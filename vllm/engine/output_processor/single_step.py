@@ -42,14 +42,6 @@ def single_step_process_prompt_logprob(
             prompt_logprobs = [None] + prompt_logprobs
             seq_group.prompt_logprobs = []
 
-        assert hasattr(sg_output_proc, 'detokenizer')
-        if (seq_group.sampling_params.detokenize
-                and sg_output_proc.detokenizer):
-            sg_output_proc.detokenizer.decode_prompt_logprobs_inplace(
-                seq_group,
-                prompt_logprobs,
-                position_offset=len(seq_group.prompt_logprobs))
-
         seq_group.prompt_logprobs.extend(prompt_logprobs)
 
 

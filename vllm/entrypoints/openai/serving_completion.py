@@ -26,7 +26,7 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     PromptAdapterPath)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
-from vllm.sequence import Logprob
+from vllm.sequence import Logprob, PromptLogprobs
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -38,6 +38,14 @@ TypeTokenIDs = List[int]
 TypeTopLogProbs = List[Optional[Dict[int, float]]]
 TypeCreateLogProbsFn = Callable[
     [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], CompletionLogProbs]
+
+
+def prompt_logprobs_convert(
+        logprobs: PromptLogprobs) -> List[Optional[Dict[int, Logprob]]]:
+    return [{
+        token_id: Logprob(logprob, rank=idx + 1)
+        for idx, (token_id, logprob) in enumerate(seqprobs)
+    } if seqprobs else None for seqprobs in logprobs]
 
 
 class OpenAIServingCompletion(OpenAIServing):
@@ -260,7 +268,8 @@ class OpenAIServingCompletion(OpenAIServing):
                         # only return the prompt
                         delta_text = prompt_text
                         delta_token_ids = prompt_token_ids
-                        out_logprobs = prompt_logprobs
+                        out_logprobs = prompt_logprobs_convert(prompt_logprobs
+                                                               or [])
                         has_echoed[i] = True
                     elif (request.echo and request.max_tokens > 0
                           and not has_echoed[i]):
@@ -273,7 +282,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             *prompt_token_ids, *output.token_ids
                         ]
                         out_logprobs = [
-                            *prompt_logprobs,
+                            *prompt_logprobs_convert(prompt_logprobs or []),
                             *(output.logprobs or []),
                         ]
                         has_echoed[i] = True
@@ -380,7 +389,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 if request.echo and request.max_tokens == 0:
                     assert prompt_text is not None
                     token_ids = prompt_token_ids
-                    out_logprobs = prompt_logprobs
+                    out_logprobs = prompt_logprobs_convert(prompt_logprobs
+                                                           or [])
                     output_text = prompt_text
                 elif request.echo and request.max_tokens > 0:
                     assert prompt_text is not None
@@ -392,7 +402,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         assert prompt_logprobs is not None
                         assert output.logprobs is not None
                         out_logprobs = [
-                            *prompt_logprobs,
+                            *prompt_logprobs_convert(prompt_logprobs or []),
                             *output.logprobs,
                         ]
 

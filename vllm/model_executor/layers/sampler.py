@@ -1055,7 +1055,7 @@ def _get_prompt_logprob_if_needed(
     top_logprobs: torch.Tensor,
     selected_logprobs_idx: int,
     top_logprob_idx: int,
-):
+) -> Tuple[Optional[PromptLogprobs], int, int]:
     """Compute the prompt logprob from a sequence group if needed."""
     sampling_params = seq_group.sampling_params
     is_prompt = seq_group.is_prompt
@@ -1071,15 +1071,13 @@ def _get_prompt_logprob_if_needed(
         selected_logprob_items = selected_logprobs[
             selected_logprobs_idx:selected_logprobs_idx +
             len(next_prompt_tokens)].tolist()
-        rank_items = ranks[selected_logprobs_idx:selected_logprobs_idx +
-                           len(next_prompt_tokens)].tolist()
 
         for idx, token_id in enumerate(next_prompt_tokens):
             # Calculate the prompt logprob of the real prompt tokens.
-            # {token_id: (logprob, rank_from_vocab)}
-            prompt_logprobs_dict: Dict[int, Tuple[float, int]] = {
-                token_id: (selected_logprob_items[idx], rank_items[idx])
-            }
+            _logprobs = [(
+                token_id,
+                selected_logprob_items[idx],
+            )]
 
             # Add top K prompt logprobs along with its rank.
             if num_logprobs > 0:
@@ -1087,18 +1085,10 @@ def _get_prompt_logprob_if_needed(
                     top_logprob_idx, :num_logprobs].tolist()
                 top_probs = top_logprobs[
                     top_logprob_idx, :num_logprobs].tolist()
-                # Top K is already sorted by rank, so we can use 1 ~
-                # num_logprobs + 1 for rank.
-                top_ranks = range(1, num_logprobs + 1)
-                prompt_logprobs_dict.update({
-                    top_id: (top_prob, rank)
-                    for top_id, top_prob, rank in zip(top_ids, top_probs,
-                                                      top_ranks)
-                })
-            prompt_logprobs.append({
-                token_id: Logprob(*logprob_and_rank)
-                for token_id, logprob_and_rank in prompt_logprobs_dict.items()
-            })
+                _logprobs.extend(
+                    (top_id, top_prob)
+                    for top_id, top_prob in zip(top_ids, top_probs))
+            prompt_logprobs.append(_logprobs)
             # + 1 to go to the next prompt token.
             top_logprob_idx += 1
 
