@@ -52,6 +52,14 @@ PromptLogprobs = List[Optional[List[TokenIdAndLogprob]]]
 SampleLogprobs = List[Dict[int, Logprob]]
 
 
+def logprobs_from_tuples(
+        tuples: PromptLogprobs) -> List[Optional[Dict[int, Logprob]]]:
+    return [{
+        token_id: Logprob(logprob, rank=idx + 1)
+        for idx, (token_id, logprob) in enumerate(seqprobs)
+    } if seqprobs else None for seqprobs in tuples]
+
+
 class SequenceStatus(enum.IntEnum):
     """Status of a sequence."""
     WAITING = 0

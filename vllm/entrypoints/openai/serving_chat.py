@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.tool_parsers import (Hermes2ProToolParser,
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.sequence import Logprob
+from vllm.sequence import Logprob, logprobs_from_tuples
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
@@ -720,7 +720,8 @@ class OpenAIServingChat(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
-            prompt_logprobs=final_res.prompt_logprobs,
+            prompt_logprobs=logprobs_from_tuples(final_res.prompt_logprobs)
+            if final_res.prompt_logprobs else None,
         )
 
         return response
