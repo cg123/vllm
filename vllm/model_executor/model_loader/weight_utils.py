@@ -6,7 +6,8 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union
+from typing import (Any, Callable, Dict, Generator, Iterable, List, Optional,
+                    Tuple, Union)
 
 import filelock
 import gguf
@@ -24,7 +25,15 @@ from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once
+from vllm.utils import PlaceholderModule, print_warning_once
+
+try:
+    from runai_model_streamer import SafetensorsStreamer
+except ImportError:
+    runai_model_streamer = PlaceholderModule(
+        "runai_model_streamer")  # type: ignore[assignment]
+    SafetensorsStreamer = runai_model_streamer.placeholder_attr(
+        "SafetensorsStreamer")
 
 logger = init_logger(__name__)
 
@@ -187,7 +196,7 @@ def get_quant_config(model_config: ModelConfig,
             f"{quant_config_files}")
 
     quant_config_file = quant_config_files[0]
-    with open(quant_config_file, "r") as f:
+    with open(quant_config_file) as f:
         config = json.load(f)
 
         if model_config.quantization == "bitsandbytes":
@@ -305,7 +314,7 @@ def filter_duplicate_safetensors_files(hf_weights_files: List[str],
 
     # Iterate through the weight_map (weight_name: safetensors files)
     # to identify weights that we should use.
-    with open(index_file_name, "r") as f:
+    with open(index_file_name) as f:
         weight_map = json.load(f)["weight_map"]
     weight_files_in_index = set()
     for weight_name in weight_map:
@@ -381,7 +390,7 @@ def np_cache_weights_iterator(
             with open(weight_names_file, "w") as f:
                 json.dump(weight_names, f)
 
-    with open(weight_names_file, "r") as f:
+    with open(weight_names_file) as f:
         weight_names = json.load(f)
 
     for name in weight_names:
@@ -409,6 +418,23 @@ def safetensors_weights_iterator(
                 yield name, param
 
 
+def runai_safetensors_weights_iterator(
+    hf_weights_files: List[str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """Iterate over the weights in the model safetensor files."""
+    enable_tqdm = not torch.distributed.is_initialized(
+    ) or torch.distributed.get_rank() == 0
+    with SafetensorsStreamer() as streamer:
+        for st_file in tqdm(
+                hf_weights_files,
+                desc="Loading safetensors using Runai Model Streamer",
+                disable=not enable_tqdm,
+                bar_format=_BAR_FORMAT,
+        ):
+            streamer.stream_file(st_file)
+            yield from streamer.get_tensors()
+
+
 def pt_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
@@ -422,8 +448,7 @@ def pt_weights_iterator(
             bar_format=_BAR_FORMAT,
     ):
         state = torch.load(bin_file, map_location="cpu")
-        for name, param in state.items():
-            yield name, param
+        yield from state.items()
         del state
         torch.cuda.empty_cache()
 
@@ -498,8 +523,8 @@ def kv_cache_scales_loader(
         logger.error("File or directory '%s' not found.", filename)
     except json.JSONDecodeError:
         logger.error("Error decoding JSON in file '%s'.", filename)
-    except Exception as e:
-        logger.error("An error occurred while reading '%s': %s", filename, e)
+    except Exception:
+        logger.exception("An error occurred while reading '%s'.", filename)
     # This section is reached if and only if any of the excepts are hit
     # Return an empty iterable (list) => no KV cache scales are loaded
     # which ultimately defaults to 1.0 scales
@@ -557,6 +582,38 @@ def row_parallel_weight_loader(param: torch.Tensor,
         loaded_weight = loaded_weight.narrow(shard_dim, start_idx, shard_size)
 
     return default_weight_loader(param, loaded_weight)
+
+
+LoaderFunction = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
+    """Create a weight loader that shards the weights along the given axis"""
+
+    def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        tp_rank = get_tensor_model_parallel_rank()
+
+        shard_size = param.data.shape[shard_axis]
+        start_idx = tp_rank * shard_size
+        loaded_weight = loaded_weight.narrow(shard_axis, start_idx, shard_size)
+
+        return default_weight_loader(param, loaded_weight)
+
+    return loader
+
+
+def composed_weight_loader(
+        loader: LoaderFunction, fn: Callable[[torch.Tensor],
+                                             torch.Tensor]) -> LoaderFunction:
+    """Create a weight loader that post-processes the weights after loading"""
+
+    def composed_loader(param: torch.Tensor,
+                        loaded_weight: torch.Tensor) -> None:
+        loader(param, loaded_weight)
+        param.data.copy_(fn(param))
+        return
+
+    return composed_loader
 
 
 def initialize_dummy_weights(

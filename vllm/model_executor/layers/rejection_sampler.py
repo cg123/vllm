@@ -1,6 +1,6 @@
 from functools import cached_property
 from importlib.util import find_spec
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.jit
@@ -31,15 +31,11 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
     """
 
     def __init__(self,
-                 disable_bonus_tokens: bool = True,
                  strict_mode: bool = False,
                  use_flashinfer: Optional[bool] = None):
         """Create a rejection sampler.
 
         Args:
-            disable_bonus_tokens: Whether or not to disable the bonus token.
-            Require when bonus tokens will cause corrupt KV cache for
-            proposal methods that require KV cache.
             strict_mode: Whether or not to perform shape/device/dtype checks
             during sampling. This catches correctness issues but adds
             nontrivial latency.
@@ -48,8 +44,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             None, we will use the default value from the environment variable.
             This parameter is only used for testing purposes.
         """
-        super().__init__(disable_bonus_tokens=disable_bonus_tokens,
-                         strict_mode=strict_mode)
+        super().__init__(strict_mode=strict_mode)
         if use_flashinfer is None:
             self.use_flashinfer = envs.VLLM_USE_FLASHINFER_SAMPLER and (
                 chain_speculative_sampling is not None)
@@ -57,8 +52,6 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             self.use_flashinfer = use_flashinfer
 
         if self.use_flashinfer:
-            assert not disable_bonus_tokens, \
-                "flashinfer will enable bonus token by default"
             logger.info("Use flashinfer for rejection sampling.")
         else:
             logger.info("Use pytorch for rejection sampling.")
@@ -375,7 +368,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 # Note that we always sample with replacement.
 # probs will be modified in place, but this is fine, as we pass
 # in a copy already.
-@torch.jit.script
+@torch.compile(dynamic=True)
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
@@ -393,16 +386,12 @@ def _multinomial(
     if not seeded_seqs:
         q.exponential_(1.0)
     else:
-        non_seeded_indices: List[int] = []
         start = 0
         for idx in range(len(q) // k):
             end = start + k
             generator = seeded_seqs.get(idx)
-            if generator is None:
-                non_seeded_indices.extend(list(range(start, end)))
-            else:
-                q[start:end].exponential_(1.0, generator=generator)
+            # Note: generator might be None for non seeded
+            q[start:end].exponential_(1.0, generator=generator)
             start = end
-        q[non_seeded_indices].exponential_(1.0)
 
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
