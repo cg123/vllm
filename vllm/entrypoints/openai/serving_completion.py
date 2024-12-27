@@ -404,7 +404,8 @@ class OpenAIServingCompletion(OpenAIServing):
             assert prompt_token_ids is not None
             prompt_logprobs = final_res.prompt_logprobs
             if prompt_logprobs:
-                for logprob_dict in prompt_logprobs:
+                prompt_logprob_dicts = logprobs_from_tuples(prompt_logprobs)
+                for logprob_dict in prompt_logprob_dicts:
                     if logprob_dict:
                         for logprob_values in logprob_dict.values():
                             if logprob_values.logprob == float('-inf'):
