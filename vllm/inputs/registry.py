@@ -1,18 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import functools
 from collections import UserDict
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Mapping, NamedTuple,
-                    Optional, Protocol, Union)
+from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional,
+                    Protocol, Union)
 
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.processor import cached_get_processor
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               cached_tokenizer_from_config)
 from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
-                        print_warning_once, resolve_mm_processor_kwargs)
+                        resolve_mm_processor_kwargs)
 
 from .data import ProcessorInputs, SingletonInputs
 from .parse import is_encoder_decoder_inputs
@@ -25,8 +29,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-C = TypeVar("C", bound=PretrainedConfig, default=PretrainedConfig)
-P = TypeVar("P", bound=ProcessorMixin, default=ProcessorMixin)
+_T = TypeVar("_T")
+_C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
+_P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 
 
 @dataclass(frozen=True)
@@ -41,9 +46,9 @@ class InputContext:
 
     def get_hf_config(
         self,
-        typ: Union[type[C], tuple[type[C], ...]] = PretrainedConfig,
+        typ: Union[type[_C], tuple[type[_C], ...]] = PretrainedConfig,
         /,
-    ) -> C:
+    ) -> _C:
         """
         Get the HuggingFace configuration
         (:class:`transformers.PretrainedConfig`) of the model,
@@ -81,10 +86,10 @@ class InputContext:
 
     def get_hf_processor(
         self,
-        typ: Union[type[P], tuple[type[P], ...]] = ProcessorMixin,
+        typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
         /,
         **kwargs: object,
-    ) -> P:
+    ) -> _P:
         """
         Get the HuggingFace processor
         (:class:`transformers.ProcessorMixin`) of the model,
@@ -93,23 +98,29 @@ class InputContext:
         Raises:
             TypeError: If the processor is not of the specified type.
         """
+        return cached_processor_from_config(
+            self.model_config,
+            processor_cls=typ,
+            **kwargs,
+        )
+
+    def init_processor(
+        self,
+        typ: type[_T],
+        /,
+        **kwargs: object,
+    ) -> _T:
+        """
+        Initialize a HuggingFace-like processor class, merging the
+        keyword arguments with those in the model's configuration.
+        """
         base_kwargs = self.model_config.mm_processor_kwargs
         if base_kwargs is None:
             base_kwargs = {}
 
         merged_kwargs = {**base_kwargs, **kwargs}
 
-        hf_processor = cached_get_processor(
-            self.model_config.model,
-            trust_remote_code=self.model_config.trust_remote_code,
-            **merged_kwargs,
-        )
-        if not isinstance(hf_processor, typ):
-            raise TypeError("Invalid type of HuggingFace processor. "
-                            f"Expected type: {typ}, but "
-                            f"found type: {type(hf_processor)}")
-
-        return hf_processor
+        return typ(**merged_kwargs)
 
 
 @dataclass(frozen=True)
@@ -119,10 +130,10 @@ class InputProcessingContext(InputContext):
 
     def get_hf_processor(
         self,
-        typ: Union[type[P], tuple[type[P], ...]] = ProcessorMixin,
+        typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
         /,
         **kwargs: object,
-    ) -> P:
+    ) -> _P:
         return super().get_hf_processor(
             typ,
             tokenizer=self.tokenizer,
@@ -132,10 +143,13 @@ class InputProcessingContext(InputContext):
     def call_hf_processor(
         self,
         hf_processor: ProcessorMixin,
-        prompt: str,
-        processor_data: Mapping[str, object],
-        inference_kwargs: Mapping[str, object],
+        data: Mapping[str, object],
+        kwargs: Mapping[str, object] = {},
     ) -> BatchFeature:
+        """
+        Call :code:`hf_processor` on the prompt :code:`data`
+        (text, image, audio...) with configurable options :code:`kwargs`.
+        """
         assert callable(hf_processor)
 
         base_kwargs = self.model_config.mm_processor_kwargs
@@ -144,21 +158,15 @@ class InputProcessingContext(InputContext):
 
         merged_kwargs = resolve_mm_processor_kwargs(
             base_kwargs,
-            inference_kwargs,
+            kwargs,
             hf_processor,
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
 
         try:
-            return hf_processor(
-                text=prompt,
-                **processor_data,
-                **merged_kwargs,
-                return_tensors="pt",
-            )
+            return hf_processor(**data, **merged_kwargs, return_tensors="pt")
         except Exception as exc:
-            data = dict(text=prompt, **processor_data)
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
 
@@ -313,9 +321,6 @@ class InputRegistry:
 
         The model is identified by ``model_config``.
 
-        See also:
-            :ref:`enabling-multimodal-inputs`
-
         Note:
             This should be called after
             :meth:`~MultiModalRegistry.init_mm_limits_per_prompt`.
@@ -323,21 +328,18 @@ class InputRegistry:
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
         from vllm.multimodal import MultiModalKwargs
-        from vllm.multimodal.utils import cached_get_tokenizer
+        from vllm.multimodal.profiling import MultiModalProfiler
 
         if mm_registry.has_processor(model_config):
-            tokenizer = cached_get_tokenizer(
-                model_config.tokenizer,
-                trust_remote_code=model_config.trust_remote_code,
-            )
-            processor = mm_registry.create_processor(model_config, tokenizer)
-
-            mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
-            mm_max_tokens = mm_registry.get_max_tokens_by_modality(
-                model_config)
-
-            dummy_data = processor.get_dummy_data(seq_len, mm_counts,
-                                                  mm_max_tokens)
+            tokenizer = cached_tokenizer_from_config(model_config)
+            processor = mm_registry.create_processor(model_config,
+                                                     tokenizer,
+                                                     disable_cache=True)
+            profiler = MultiModalProfiler(processor)
+            dummy_data_factory = (profiler.get_encoder_dummy_data
+                                  if is_encoder_data else
+                                  profiler.get_decoder_dummy_data)
+            dummy_data = dummy_data_factory(seq_len)
         else:
             model_cls, _ = get_model_architecture(model_config)
             if is_encoder_data:
@@ -346,7 +348,11 @@ class InputRegistry:
                 dummy_factory = self._get_dummy_data_factory(model_cls)
             mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-                dummy_factory, overrides=model_config.mm_processor_kwargs)
+                dummy_factory,
+                overrides=model_config.mm_processor_kwargs,
+                requires_kw_only=False,
+                allow_var_kwargs=True,
+            )
 
             dummy_data = dummy_factory(InputContext(model_config), seq_len,
                                        _MultiModalCounts(mm_counts),
@@ -356,7 +362,7 @@ class InputRegistry:
         num_tokens = dummy_data.seq_data.prompt_token_ids
         if len(num_tokens) < seq_len:
             if is_encoder_data:
-                print_warning_once(
+                logger.warning_once(
                     f"Expected at least {seq_len} dummy encoder tokens for "
                     f"profiling, but found {len(num_tokens)} tokens instead.")
             else:
@@ -379,6 +385,7 @@ class InputRegistry:
         self,
         ctx: InputContext,
         inputs: ProcessorInputs,
+        **kwargs: object,
     ) -> ProcessorInputs:
         """The default input processor is a no-op."""
         return inputs
@@ -388,10 +395,8 @@ class InputRegistry:
         Register an input processor to a model class.
 
         The provided function is invoked on each input to the model. This
-        happens before :meth:`~vllm.multimodal.MultiModalRegistry.map_input`.
-
-        See also:
-            :ref:`input-processing-pipeline`
+        happens before
+        :meth:`~vllm.multimodal.registry.MultiModalRegistry.map_input`.
         """
 
         def wrapper(model_cls: N) -> N:
@@ -425,7 +430,7 @@ class InputRegistry:
             # Be more strict in V2
             assert "mm_kwargs" in inputs
         else:
-            assert_never(inputs["type"])
+            assert_never(inputs["type"])  # type: ignore[arg-type]
 
     def process_input(self, model_config: "ModelConfig",
                       inputs: ProcessorInputs) -> ProcessorInputs:
@@ -433,9 +438,6 @@ class InputRegistry:
         Apply an input processor to an instance of model inputs.
 
         The model is identified by ``model_config``.
-
-        See also:
-            :ref:`input-processing-pipeline`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
@@ -450,6 +452,8 @@ class InputRegistry:
             model_config.mm_processor_kwargs,
             inputs.get("mm_processor_kwargs", {}),  # type: ignore
             processor,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
         )
 
         processed_inputs = processor(

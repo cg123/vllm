@@ -1,8 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import base64
 import time
-from typing import AsyncGenerator, Final, List, Literal, Optional, Union, cast
+from collections.abc import AsyncGenerator
+from typing import Final, Literal, Optional, Union, cast
 
+import jinja2
 import numpy as np
 from fastapi import Request
 from typing_extensions import assert_never
@@ -15,7 +19,8 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               PoolingChatRequest,
                                               PoolingRequest, PoolingResponse,
                                               PoolingResponseData, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.utils import merge_async_iterators
@@ -26,7 +31,7 @@ logger = init_logger(__name__)
 def _get_data(
     output: PoolingOutput,
     encoding_format: Literal["float", "base64"],
-) -> Union[List[float], str]:
+) -> Union[list[float], str]:
     if encoding_format == "float":
         return output.data.tolist()
     elif encoding_format == "base64":
@@ -44,7 +49,7 @@ class OpenAIServingPooling(OpenAIServing):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
-        base_model_paths: List[BaseModelPath],
+        models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
@@ -52,9 +57,7 @@ class OpenAIServingPooling(OpenAIServing):
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
-                         base_model_paths=base_model_paths,
-                         lora_modules=None,
-                         prompt_adapters=None,
+                         models=models,
                          request_logger=request_logger)
 
         self.chat_template = chat_template
@@ -78,7 +81,7 @@ class OpenAIServingPooling(OpenAIServing):
             return self.create_error_response(
                 "dimensions is currently not supported")
 
-        model_name = request.model
+        model_name = self._get_model_name(request.model)
         request_id = f"pool-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
@@ -136,9 +139,15 @@ class OpenAIServingPooling(OpenAIServing):
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
+        except TypeError as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
+        except jinja2.TemplateError as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
             pooling_params = request.to_pooling_params()
 
@@ -173,7 +182,7 @@ class OpenAIServingPooling(OpenAIServing):
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
-        final_res_batch: List[Optional[PoolingRequestOutput]]
+        final_res_batch: list[Optional[PoolingRequestOutput]]
         final_res_batch = [None] * num_prompts
         try:
             async for i, res in result_generator:
@@ -181,7 +190,7 @@ class OpenAIServingPooling(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(List[PoolingRequestOutput],
+            final_res_batch_checked = cast(list[PoolingRequestOutput],
                                            final_res_batch)
 
             response = self.request_output_to_pooling_response(
@@ -201,13 +210,13 @@ class OpenAIServingPooling(OpenAIServing):
 
     def request_output_to_pooling_response(
         self,
-        final_res_batch: List[PoolingRequestOutput],
+        final_res_batch: list[PoolingRequestOutput],
         request_id: str,
         created_time: int,
         model_name: str,
         encoding_format: Literal["float", "base64"],
     ) -> PoolingResponse:
-        items: List[PoolingResponseData] = []
+        items: list[PoolingResponseData] = []
         num_prompt_tokens = 0
 
         for idx, final_res in enumerate(final_res_batch):

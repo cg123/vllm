@@ -1,11 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
 """PyTorch MAMBA model."""
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 from torch import nn
 from transformers import MambaConfig
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
@@ -19,7 +19,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (HasInnerState,
-                                                   IsAttentionFree, SupportsPP)
+                                                   IsAttentionFree, SupportsPP,
+                                                   SupportsV0Only)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -38,10 +39,12 @@ class MambaDecoderLayer(nn.Module):
     def __init__(self,
                  config: MambaConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 is_lora_enabled: Optional[bool] = False) -> None:
         super().__init__()
         self.config = config
         self.is_falcon_mamba = config.model_type == "falcon_mamba"
+        self.is_lora_enabled = is_lora_enabled
         mixer_rms_eps = config.mixer_rms_eps if self.is_falcon_mamba else None
         self.mixer = MambaMixer(hidden_size=config.hidden_size,
                                 ssm_state_size=config.state_size,
@@ -53,14 +56,14 @@ class MambaDecoderLayer(nn.Module):
                                 use_rms_norm=self.is_falcon_mamba,
                                 rms_norm_has_weight=not self.is_falcon_mamba,
                                 rms_norm_eps=mixer_rms_eps,
-                                activation=config.hidden_act)
+                                activation=config.hidden_act,
+                                is_lora_enabled=self.is_lora_enabled)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
         **kwargs,
@@ -71,8 +74,7 @@ class MambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states, attn_metadata,
-                                   mamba_cache_params)
+        hidden_states = self.mixer(hidden_states, mamba_cache_params)
         return hidden_states, residual
 
 
@@ -85,9 +87,9 @@ class MambaModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
+        is_lora_enabled = bool(lora_config)
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
                        (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
@@ -101,8 +103,10 @@ class MambaModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: MambaDecoderLayer(
-                config, cache_config=cache_config, quant_config=quant_config),
+            lambda prefix: MambaDecoderLayer(config,
+                                             cache_config=cache_config,
+                                             quant_config=quant_config,
+                                             is_lora_enabled=is_lora_enabled),
             prefix=f"{prefix}.layers")
 
         self.norm_f = RMSNorm(config.hidden_size,
@@ -118,7 +122,6 @@ class MambaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
@@ -139,7 +142,6 @@ class MambaModel(nn.Module):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
-                attn_metadata=attn_metadata,
                 residual=residual,
                 mamba_cache_params=mamba_cache_params.at_layer_idx(
                     i - self.start_layer))
@@ -153,20 +155,20 @@ class MambaModel(nn.Module):
         return hidden_states
 
 
-class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
+class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP,
+                       SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
-        scheduler_config = vllm_config.scheduler_config
+        self.scheduler_config = vllm_config.scheduler_config
         assert not cache_config.enable_prefix_caching, \
             "Mamba does not support prefix caching"
 
         super().__init__()
         self.config = config
         self.vllm_config = vllm_config
-        self.scheduler_config = scheduler_config
         self.model_config = vllm_config.model_config
         self.backbone = MambaModel(vllm_config=vllm_config,
                                    prefix=maybe_prefix(prefix, "backbone"))
@@ -195,17 +197,6 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.backbone.make_empty_intermediate_tensors)
-        if self.scheduler_config is not None and \
-            not self.model_config.enforce_eager:
-            if self.scheduler_config.max_num_seqs > \
-                vllm_config.compilation_config.max_capture_size:
-                self.max_batch_size = \
-                    vllm_config.compilation_config.max_capture_size
-            else:
-                self.max_batch_size = vllm_config.pad_for_cudagraph(
-                    self.scheduler_config.max_num_seqs)
-        else:
-            self.max_batch_size = 8192 + 2
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.backbone.get_input_embeddings(input_ids)
@@ -213,8 +204,6 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List[KVCache],
-                attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
@@ -222,22 +211,13 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
             self.mamba_cache = MambaCacheManager(
-                self.lm_head.weight.dtype, num_mamba_layers,
-                self.max_batch_size, *self._get_mamba_cache_shape())
+                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
+                *self._get_mamba_cache_shape())
 
-        (
-            mamba_cache_tensors,
-            state_indices_tensor,
-        ) = self.mamba_cache.current_run_tensors(input_ids, attn_metadata,
-                                                 **kwargs)
+        mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
-        mamba_cache_params = MambaCacheParams(mamba_cache_tensors[0],
-                                              mamba_cache_tensors[1],
-                                              state_indices_tensor)
-
-        hidden_states = self.backbone(input_ids, positions, attn_metadata,
-                                      mamba_cache_params, intermediate_tensors,
-                                      inputs_embeds)
+        hidden_states = self.backbone(input_ids, positions, mamba_cache_params,
+                                      intermediate_tensors, inputs_embeds)
 
         return hidden_states
 
