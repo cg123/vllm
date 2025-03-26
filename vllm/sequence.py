@@ -48,7 +48,7 @@ class Logprob:
     decoded_token: Optional[str] = None
 
 
-TokenIdAndLogprob = Tuple[int, float]
+TokenIdAndLogprob = tuple[int, float]
 # list of (token_id, logprob) pairs for each sequence group. None if
 # sequence group doesn't require prompt logprob.
 PromptLogprobs = list[Optional[list[TokenIdAndLogprob]]]
@@ -57,7 +57,7 @@ SampleLogprobs = list[dict[int, Logprob]]
 
 
 def logprobs_from_tuples(
-        tuples: PromptLogprobs) -> List[Optional[Dict[int, Logprob]]]:
+        tuples: PromptLogprobs) -> list[Optional[dict[int, Logprob]]]:
     return [{
         token_id: Logprob(logprob, rank=idx + 1)
         for idx, (token_id, logprob) in enumerate(seqprobs)

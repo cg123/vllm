@@ -948,7 +948,7 @@ class OpenAIServingChat(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
-            prompt_logprobs=clamp_prompt_logprobs(logprobs_from_tuples(final_res.prompt_logprobs) iffinal_res.prompt_lobprobs else None),
+            prompt_logprobs=clamp_prompt_logprobs(logprobs_from_tuples(final_res.prompt_logprobs) if final_res.prompt_lobprobs else None),
         )
 
         return response

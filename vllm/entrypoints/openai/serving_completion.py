@@ -410,7 +410,7 @@ class OpenAIServingCompletion(OpenAIServing):
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
-            prompt_logprobs = clamp_prompt_logprobs(logprobs_from_tuples(prompt_logprobs) if prompt_logprobs else None)
+            prompt_logprobs = clamp_prompt_logprobs(logprobs_from_tuples(final_res.prompt_logprobs) if final_res.prompt_logprobs else None)
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]
