@@ -295,8 +295,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             delta_text = prompt_text
                             delta_token_ids = prompt_token_ids
                             out_logprobs = logprobs_from_tuples(
-                                prompt_logprobs
-                            ) if prompt_logprobs is not None else None
+                                prompt_logprobs)
                         else:
                             assert prompt_logprobs is not None
                             # echo the prompt and first token
@@ -410,7 +409,8 @@ class OpenAIServingCompletion(OpenAIServing):
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
-            prompt_logprobs = clamp_prompt_logprobs(logprobs_from_tuples(final_res.prompt_logprobs) if final_res.prompt_logprobs else None)
+            prompt_logprobs = clamp_prompt_logprobs(
+                logprobs_from_tuples(final_res.prompt_logprobs))
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]
@@ -423,9 +423,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     assert prompt_text is not None
                     if request.max_tokens == 0:
                         token_ids = prompt_token_ids
-                        out_logprobs = logprobs_from_tuples(
-                            prompt_logprobs
-                        ) if prompt_logprobs is not None else None
+                        out_logprobs = logprobs_from_tuples(prompt_logprobs)
                         output_text = prompt_text
                     else:
                         token_ids = [*prompt_token_ids, *output.token_ids]
@@ -538,10 +536,11 @@ class OpenAIServingCompletion(OpenAIServing):
                 out_top_logprobs.append({
                     # Convert float("-inf") to the
                     # JSON-serializable float that OpenAI uses
-                    self._get_decoded_token(top_lp[1],
-                                            top_lp[0],
-                                            tokenizer,
-                                            return_as_token_id=should_return_as_token_id):
+                    self._get_decoded_token(
+                        top_lp[1],
+                        top_lp[0],
+                        tokenizer,
+                        return_as_token_id=should_return_as_token_id):
                     max(top_lp[1].logprob, -9999.0)
                     for i, top_lp in enumerate(step_top_logprobs.items())
                     if num_output_top_logprobs >= i

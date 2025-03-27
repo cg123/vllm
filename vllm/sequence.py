@@ -57,7 +57,10 @@ SampleLogprobs = list[dict[int, Logprob]]
 
 
 def logprobs_from_tuples(
-        tuples: PromptLogprobs) -> list[Optional[dict[int, Logprob]]]:
+    tuples: Optional[PromptLogprobs]
+) -> Optional[list[Optional[dict[int, Logprob]]]]:
+    if tuples is None:
+        return None
     return [{
         token_id: Logprob(logprob, rank=idx + 1)
         for idx, (token_id, logprob) in enumerate(seqprobs)
