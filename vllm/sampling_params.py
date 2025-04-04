@@ -169,6 +169,10 @@ class SamplingParams(
             always return the log probability of the sampled token, so there
             may be up to `logprobs+1` elements in the response.
         prompt_logprobs: Number of log probabilities to return per prompt token.
+        logprob_multinomial_sampling: Whether to use multinomial sampling for
+            logprobs. If true, instead of the top-k logprobs, the model will
+            sample token indices from the complete distribution of all tokens
+            and return the logprobs of the sampled tokens.
         detokenize: Whether to detokenize the output. Defaults to True.
         skip_special_tokens: Whether to skip special tokens in the output.
         spaces_between_special_tokens: Whether to add spaces between special
@@ -209,6 +213,7 @@ class SamplingParams(
     min_tokens: int = 0
     logprobs: Optional[int] = None
     prompt_logprobs: Optional[int] = None
+    logprob_multinomial_sampling: bool = False
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.

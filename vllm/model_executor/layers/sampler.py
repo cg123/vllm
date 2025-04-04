@@ -908,13 +908,23 @@ def get_logprobs(
 
         # We need to compute top k only if there exists logprobs > 0.
         if largest_num_logprobs > 0:
-            # Logprobs of topk tokens for a batch of sequence groups.
-            # (num_query_tokens_across_batch).
-            top_logprobs, top_token_ids = torch.topk(logprobs,
-                                                     largest_num_logprobs,
-                                                     dim=-1)
-            top_logprobs = top_logprobs.to('cpu')
-            top_token_ids = top_token_ids.to('cpu')
+            if sampling_params.logprob_multinomial_sampling:
+                probs = torch.exp(logprobs)
+                # (num_query_tokens_across_batch, num_vocab).
+                sampled_indices = _multinomial(
+                    probs[query_indices_gpu], largest_num_logprobs)
+                # (num_query_tokens_across_batch, num_logprobs).
+                top_logprobs = logprobs[query_indices_gpu,
+                                       sampled_indices].to('cpu')
+                top_token_ids = sampled_indices.to('cpu')
+            else:
+                # Logprobs of topk tokens for a batch of sequence groups.
+                # (num_query_tokens_across_batch).
+                top_logprobs, top_token_ids = torch.topk(logprobs,
+                                                        largest_num_logprobs,
+                                                        dim=-1)
+                top_logprobs = top_logprobs.to('cpu')
+                top_token_ids = top_token_ids.to('cpu')
 
         selected_logprobs = selected_logprobs.to('cpu')
         ranks = ranks.to('cpu')
