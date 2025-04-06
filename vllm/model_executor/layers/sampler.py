@@ -914,7 +914,7 @@ def get_logprobs(
                 # the probability distribution of each row.
                 top_token_ids = torch.multinomial(
                     probs, largest_num_logprobs,
-                    replacement=False)  # (N, largest_num_logprobs)
+                    replacement=True)  # (N, largest_num_logprobs)
                 top_logprobs = torch.gather(logprobs, 1, top_token_ids)
             else:
                 # Logprobs of topk tokens for a batch of sequence groups.
