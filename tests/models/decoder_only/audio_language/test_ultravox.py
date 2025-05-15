@@ -8,7 +8,7 @@ import pytest_asyncio
 from transformers import AutoModel, AutoTokenizer
 
 from vllm.multimodal.audio import resample_audio
-from vllm.sequence import SampleLogprobs
+from vllm.sequence import SampleLogprobs, unpack_sample_logprobs
 
 from ....conftest import HfRunner, VllmRunner
 from ....utils import RemoteOpenAIServer
@@ -82,6 +82,7 @@ def vllm_to_hf_output(vllm_output: tuple[list[int], str,
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
+    out_logprobs = unpack_sample_logprobs(out_logprobs)
 
     tokenizer = AutoTokenizer.from_pretrained(model)
     eos_token_id = tokenizer.eos_token_id

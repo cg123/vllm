@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 
 from vllm.multimodal.image import rescale_image_size
 from vllm.platforms import current_platform
-from vllm.sequence import SampleLogprobs
+from vllm.sequence import SampleLogprobs, unpack_sample_logprobs
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ...utils import check_logprobs_close
@@ -30,6 +30,7 @@ def vllm_to_hf_output(vllm_output: tuple[list[int], str,
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
+    out_logprobs = unpack_sample_logprobs(out_logprobs)
 
     output_str_without_image = re.sub(r"(<\|image_\d+\|>)+", "", output_str)
     assert output_str_without_image[0] == " "

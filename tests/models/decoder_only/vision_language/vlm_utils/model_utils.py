@@ -13,7 +13,7 @@ from PIL.Image import Image
 from transformers import (AutoConfig, AutoTokenizer, BatchFeature,
                           GenerationConfig)
 
-from vllm.sequence import SampleLogprobs
+from vllm.sequence import SampleLogprobs, unpack_sample_logprobs
 from vllm.transformers_utils.tokenizer import patch_padding_side
 
 from .....conftest import HfRunner, ImageAsset, _ImageAssets
@@ -51,6 +51,7 @@ def qwen_vllm_to_hf_output(
         model: str) -> tuple[list[int], str, Optional[SampleLogprobs]]:
     """Sanitize vllm output [qwen models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
+    out_logprobs = unpack_sample_logprobs(out_logprobs)
 
     hf_output_str = output_str + "<|endoftext|>"
 
@@ -62,6 +63,7 @@ def qwen2_vllm_to_hf_output(
         model: str) -> tuple[list[int], str, Optional[SampleLogprobs]]:
     """Sanitize vllm output [qwen2 models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
+    out_logprobs = unpack_sample_logprobs(out_logprobs)
 
     hf_output_str = output_str + "<|im_end|>"
 
@@ -87,6 +89,7 @@ def _llava_vllm_to_hf_output(vllm_output: RunnerOutput, model: str,
                              mm_token_id: int) -> RunnerOutput:
     """Sanitize vllm output [Llava models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
+    out_logprobs = unpack_sample_logprobs(out_logprobs)
 
     tokenizer = AutoTokenizer.from_pretrained(model)
     eos_token_id = tokenizer.eos_token_id
