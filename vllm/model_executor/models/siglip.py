@@ -3,7 +3,8 @@
 within a vision language model."""
 
 import math
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -31,9 +32,6 @@ class SiglipEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
         image_width: int,
         image_height: int,
     ) -> int:
-        return self.get_patch_grid_length()**2
-
-    def get_max_image_tokens(self) -> int:
         return self.get_patch_grid_length()**2
 
     def get_image_size(self) -> int:
@@ -208,8 +206,10 @@ class SiglipMLP(nn.Module):
 
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        # Special handling for BNB quantization
-        if quant_config and quant_config.get_name() == "bitsandbytes":
+        # Special handling for BNB and torchao quantization
+        if quant_config and quant_config.get_name() in [
+                "bitsandbytes", "torchao"
+        ]:
             quantizable = True
         else:
             # For other quantization, we require the hidden size to be a
@@ -266,7 +266,7 @@ class SiglipEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-    ) -> Tuple[torch.Tensor, None]:
+    ) -> tuple[torch.Tensor, None]:
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
@@ -481,8 +481,8 @@ class SiglipVisionModel(nn.Module):
             feature_sample_layers=feature_sample_layers,
         )
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -490,7 +490,7 @@ class SiglipVisionModel(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:

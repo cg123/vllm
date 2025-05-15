@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Test the functionality of the Transformers backend.
-
-Run `pytest tests/models/test_transformers.py`.
-"""
-from contextlib import nullcontext
-
+"""Test the functionality of the Transformers backend."""
 import pytest
+
+from vllm.platforms import current_platform
 
 from ..conftest import HfRunner, VllmRunner
 from ..utils import multi_gpu_test
@@ -38,11 +35,13 @@ def check_implementation(
     )
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Llama-3.2-1B-Instruct, Ilama-3.2-1B produce memory access fault.")
 @pytest.mark.parametrize(
     "model,model_impl",
     [
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers"),
-        ("openai-community/gpt2", "transformers"),
         ("ArthurZ/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
     ])  # trust_remote_code=True by default
 def test_models(
@@ -52,20 +51,11 @@ def test_models(
     model: str,
     model_impl: str,
 ) -> None:
-
-    maybe_raises = nullcontext()
-    if model == "openai-community/gpt2" and model_impl == "transformers":
-        # Model is not backend compatible
-        maybe_raises = pytest.raises(
-            ValueError,
-            match="The Transformers implementation.*not compatible with vLLM")
-
-    with maybe_raises:
-        check_implementation(hf_runner,
-                             vllm_runner,
-                             example_prompts,
-                             model,
-                             model_impl=model_impl)
+    check_implementation(hf_runner,
+                         vllm_runner,
+                         example_prompts,
+                         model,
+                         model_impl=model_impl)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -79,12 +69,14 @@ def test_distributed(
                          "meta-llama/Llama-3.2-1B-Instruct", **kwargs)
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="bitsandbytes quantization is currently not supported in rocm.")
 @pytest.mark.parametrize("model, quantization_kwargs", [
     (
         "meta-llama/Llama-3.2-1B-Instruct",
         {
             "quantization": "bitsandbytes",
-            "load_format": "bitsandbytes",
         },
     ),
 ])

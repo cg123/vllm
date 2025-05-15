@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import (Callable, Dict, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, Union, overload)
+from typing import Callable, Literal, Optional, Protocol, Union, overload
 
 import torch
 import torch.nn as nn
 from torch.func import functional_call
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_pin_memory_available
+from vllm.utils import (get_cuda_view_from_cpu_tensor, is_pin_memory_available,
+                        is_uva_available)
 
 logger = init_logger(__name__)
 
@@ -56,15 +58,15 @@ class WeightsMapper:
         return key
 
     def apply(
-        self, weights: Iterable[Tuple[str, torch.Tensor]]
-    ) -> Iterable[Tuple[str, torch.Tensor]]:
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
         return ((out_name, data) for name, data in weights
                 if (out_name := self._map_name(name)) is not None)
 
 
 class AutoWeightsLoader:
     """
-    Helper class to load weights into a :class:`torch.nn.Module`. It is able
+    Helper class to load weights into a {class}`torch.nn.Module`. It is able
     to automatically detect child modules and parameters while iterating over
     the weights only once.
 
@@ -82,8 +84,8 @@ class AutoWeightsLoader:
         self,
         module: nn.Module,
         *,
-        skip_prefixes: Optional[List[str]] = None,
-        ignore_unexpected_prefixes: Optional[List[str]] = None,
+        skip_prefixes: Optional[list[str]] = None,
+        ignore_unexpected_prefixes: Optional[list[str]] = None,
     ) -> None:
         super().__init__()
 
@@ -93,8 +95,8 @@ class AutoWeightsLoader:
 
     def _groupby_prefix(
         self,
-        weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> Iterable[Tuple[str, Iterable[Tuple[str, torch.Tensor]]]]:
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> Iterable[tuple[str, Iterable[tuple[str, torch.Tensor]]]]:
         weights_by_parts = ((weight_name.split(".", 1), weight_data)
                             for weight_name, weight_data in weights)
 
@@ -127,7 +129,7 @@ class AutoWeightsLoader:
         self,
         base_prefix: str,
         param: nn.Parameter,
-        weights: Iterable[Tuple[str, torch.Tensor]],
+        weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
         for weight_name, weight_data in weights:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
@@ -156,11 +158,31 @@ class AutoWeightsLoader:
 
             yield weight_qualname
 
+    def _add_loadable_non_param_tensors(self, module: nn.Module,
+                                        child_params: dict[str, torch.Tensor]):
+        """
+        Add tensor names that are not in the model params that may be in the
+        safetensors, e.g., batch normalization stats.
+        """
+        if isinstance(module, (
+                nn.BatchNorm1d,
+                nn.BatchNorm2d,
+                nn.BatchNorm3d,
+                nn.LazyBatchNorm1d,
+                nn.LazyBatchNorm2d,
+                nn.LazyBatchNorm3d,
+                nn.SyncBatchNorm,
+        )):
+            module_state_dict = module.state_dict()
+            for stat_name in ("running_mean", "running_var",
+                              "num_batches_tracked"):
+                child_params[stat_name] = module_state_dict[stat_name]
+
     def _load_module(
         self,
         base_prefix: str,
         module: nn.Module,
-        weights: Iterable[Tuple[str, torch.Tensor]],
+        weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
         if isinstance(module, PPMissingLayer):
             return
@@ -183,6 +205,10 @@ class AutoWeightsLoader:
 
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
+
+        # Add missing tensors the weight loader needs to be able to load
+        # that aren't registered as params, e.g., batchnorm statistics.
+        self._add_loadable_non_param_tensors(module, child_params)
 
         for child_prefix, child_weights in self._groupby_prefix(weights):
             prefix = self._get_qualname(base_prefix, child_prefix)
@@ -225,10 +251,10 @@ class AutoWeightsLoader:
 
     def load_weights(
         self,
-        weights: Iterable[Tuple[str, torch.Tensor]],
+        weights: Iterable[tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
-    ) -> Set[str]:
+    ) -> set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
 
@@ -247,7 +273,7 @@ def init_vllm_registered_model(
     Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
-    from vllm.model_executor.model_loader.loader import _initialize_model
+    from vllm.model_executor.model_loader.utils import initialize_model
 
     if hf_config is None and architectures is not None:
         # So that the architectures field is overridden
@@ -257,7 +283,7 @@ def init_vllm_registered_model(
         vllm_config = vllm_config.with_hf_config(hf_config,
                                                  architectures=architectures)
 
-    return _initialize_model(vllm_config=vllm_config, prefix=prefix)
+    return initialize_model(vllm_config=vllm_config, prefix=prefix)
 
 
 @overload
@@ -266,13 +292,13 @@ def flatten_bn(x: torch.Tensor) -> torch.Tensor:
 
 
 @overload
-def flatten_bn(x: List[torch.Tensor]) -> List[torch.Tensor]:
+def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]:
     ...
 
 
 @overload
 def flatten_bn(
-    x: Union[List[torch.Tensor], torch.Tensor],
+    x: Union[list[torch.Tensor], torch.Tensor],
     *,
     concat: Literal[True],
 ) -> torch.Tensor:
@@ -281,18 +307,18 @@ def flatten_bn(
 
 @overload
 def flatten_bn(
-    x: Union[List[torch.Tensor], torch.Tensor],
+    x: Union[list[torch.Tensor], torch.Tensor],
     *,
     concat: bool = False,
-) -> Union[List[torch.Tensor], torch.Tensor]:
+) -> Union[list[torch.Tensor], torch.Tensor]:
     ...
 
 
 def flatten_bn(
-    x: Union[List[torch.Tensor], torch.Tensor],
+    x: Union[list[torch.Tensor], torch.Tensor],
     *,
     concat: bool = False,
-) -> Union[List[torch.Tensor], torch.Tensor]:
+) -> Union[list[torch.Tensor], torch.Tensor]:
     """
     Flatten the ``B`` and ``N`` dimensions of batched multimodal inputs.
 
@@ -416,7 +442,7 @@ def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
-    placeholder_token_id: Union[int, List[int]],
+    placeholder_token_id: Union[int, list[int]],
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
@@ -495,7 +521,10 @@ def set_cpu_offload_max_bytes(max_bytes: int) -> None:
 
 
 def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
-    device = next(module.parameters()).device
+    if (params := next(module.parameters(), None)) is None:
+        return module
+
+    device = params.device
 
     if device == torch.device("cpu"):
         return module
@@ -505,6 +534,14 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
         return module
 
     pin_memory = is_pin_memory_available()
+    uva_available = is_uva_available()
+
+    if envs.VLLM_USE_V1:
+        assert uva_available, ("V1 CPU offloading requires"
+                               " uva (pin memory) support")
+        uva_offloading = True
+    else:
+        uva_offloading = False
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
@@ -523,11 +560,16 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
                                        device='cpu',
                                        pin_memory=pin_memory)
         cpu_data.copy_(p.data)
-        p.data = cpu_data
+        if not uva_offloading:
+            p.data = cpu_data
+        else:
+            # keep the cpu data alive
+            p._vllm_offloaded_cpu_data = cpu_data
+            p.data = get_cuda_view_from_cpu_tensor(cpu_data)
         _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
         offloaded_parameters = True
 
-    if offloaded_parameters:
+    if offloaded_parameters and not uva_offloading:
         original_forward = module.forward
 
         def forward(*args, **kwargs):
@@ -554,7 +596,7 @@ def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
     prefix: str,
-) -> Tuple[int, int, torch.nn.ModuleList]:
+) -> tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
     """
@@ -572,10 +614,10 @@ def make_layers(
 
 
 # NOTE: don't use lru_cache here because it can prevent garbage collection
-_model_to_pp_missing_layer_names: Dict[int, List[str]] = {}
+_model_to_pp_missing_layer_names: dict[int, list[str]] = {}
 
 
-def get_pp_missing_layer_names(model: torch.nn.Module) -> List[str]:
+def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
     """Get the names of the missing layers in a pipeline parallel model."""
     model_id = id(model)
     if model_id in _model_to_pp_missing_layer_names:
@@ -603,7 +645,7 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
         for missing_layer_name in get_pp_missing_layer_names(model))
 
 
-def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
+def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
 
     def make_empty_intermediate_tensors(
         batch_size: int,
@@ -642,7 +684,7 @@ def extract_layer_index(layer_name: str) -> int:
     - "model.encoder.layers.0.sub.1" -> ValueError
     """
     subnames = layer_name.split(".")
-    int_vals: List[int] = []
+    int_vals: list[int] = []
     for subname in subnames:
         try:
             int_vals.append(int(subname))
@@ -661,3 +703,12 @@ def cast_overflow_tensors(
         clamp_value = torch.finfo(tensors.dtype).max - offset
         tensors = torch.clamp(tensors, min=-clamp_value, max=clamp_value)
     return tensors
+
+
+def fast_topk(values, topk, dim):
+    if topk == 1:
+        # Use max along the specified dimension to get both value and index
+        return torch.max(values, dim=dim, keepdim=True)
+    else:
+        # Use topk for efficiency with larger k values
+        return torch.topk(values, topk, dim=dim)

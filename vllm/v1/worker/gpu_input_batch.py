@@ -2,24 +2,22 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, cast
+from typing import Optional, cast
 
 import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
-from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.worker.block_table import MultiGroupBlockTable
 
 _SAMPLING_EPS = 1e-5
-
-if TYPE_CHECKING:
-    from vllm.multimodal.inputs import PlaceholderRange
 
 
 @dataclass
@@ -27,13 +25,12 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
-    prompt: Optional[str]
     mm_inputs: list[MultiModalKwargs]
-    mm_positions: list["PlaceholderRange"]
+    mm_positions: list[PlaceholderRange]
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: list[int]
+    block_ids: list[list[int]]
     num_computed_tokens: int
     output_token_ids: list[int]
 
@@ -42,9 +39,18 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
 
+    def __post_init__(self):
+        self.num_prompt_tokens = len(self.prompt_token_ids)
+
     @property
     def num_tokens(self) -> int:
-        return len(self.prompt_token_ids) + len(self.output_token_ids)
+        return self.num_prompt_tokens + len(self.output_token_ids)
+
+    def get_token_id(self, idx: int) -> int:
+        if idx < self.num_prompt_tokens:
+            return self.prompt_token_ids[idx]
+        else:
+            return self.output_token_ids[idx - self.num_prompt_tokens]
 
 
 class InputBatch:
@@ -53,14 +59,15 @@ class InputBatch:
         self,
         max_num_reqs: int,
         max_model_len: int,
-        max_num_blocks_per_req: int,
+        max_num_batched_tokens: int,
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
+        kv_cache_config: KVCacheConfig,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = max_num_blocks_per_req
+        self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
@@ -92,11 +99,13 @@ class InputBatch:
             self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
-        self.block_table = BlockTable(
+        self.block_table = MultiGroupBlockTable(
             max_num_reqs=max_num_reqs,
-            max_num_blocks_per_req=max_num_blocks_per_req,
+            max_model_len=max_model_len,
+            max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             device=device,
+            kv_cache_config=kv_cache_config,
         )
 
         # Sampling-related.

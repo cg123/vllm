@@ -22,7 +22,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Nemotron model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -38,7 +39,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -63,14 +63,14 @@ def _cast_if_autocast_enabled(*args):
     if not torch.is_autocast_enabled():
         return args
     else:
-        return torch.cuda.amp.autocast_mode._cast(
-            args, torch.get_autocast_gpu_dtype())
+        return torch.amp.autocast_mode._cast(
+            args, device_type="cuda", dtype=torch.get_autocast_gpu_dtype())
 
 
 class NemotronLayerNorm1P(nn.LayerNorm):
 
     def __init__(self,
-                 normalized_shape: Union[int, List[int], torch.Size],
+                 normalized_shape: Union[int, list[int], torch.Size],
                  eps: float = 1e-5,
                  elementwise_affine: bool = True,
                  bias: bool = True,
@@ -89,7 +89,7 @@ class NemotronLayerNorm1P(nn.LayerNorm):
             residual = x
         args = _cast_if_autocast_enabled(x, self.normalized_shape,
                                          self.weight + 1, self.bias, self.eps)
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             x = torch.nn.functional.layer_norm(*args)
             return x if residual is None else (x, residual)
 
@@ -134,7 +134,7 @@ class NemotronAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
@@ -268,7 +268,7 @@ class NemotronDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -416,8 +416,6 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         else:
             self.lm_head = PPMissingLayer()
 
-        self.sampler = get_sampler()
-
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -444,16 +442,8 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -461,7 +451,7 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             (".qkv_proj", ".v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue

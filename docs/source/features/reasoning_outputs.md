@@ -4,7 +4,7 @@
 
 vLLM offers support for reasoning models like [DeepSeek R1](https://huggingface.co/deepseek-ai/DeepSeek-R1), which are designed to generate outputs containing both reasoning steps and final conclusions.
 
-Reasoning models return a additional `reasoning_content` field in their outputs, which contains the reasoning steps that led to the final conclusion. This field is not present in the outputs of other models.
+Reasoning models return an additional `reasoning_content` field in their outputs, which contains the reasoning steps that led to the final conclusion. This field is not present in the outputs of other models.
 
 ## Supported Models
 
@@ -14,14 +14,19 @@ vLLM currently supports the following reasoning models:
 |--------------|-------------|------------------|-------------|
 | [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `guided_json`, `guided_regex` | ❌ |
 | [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` | ✅ |
+| [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
+| [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `guided_json`, `guided_regex` | ✅ |
+
+:::{note}
+IBM Granite 3.2 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
+:::
 
 ## Quickstart
 
-To use reasoning models, you need to specify the `--enable-reasoning` and `--reasoning-parser` flags when making a request to the chat completion endpoint. The `--reasoning-parser` flag specifies the reasoning parser to use for extracting reasoning content from the model output.
+To use reasoning models, you need to specify the `--reasoning-parser` flags when making a request to the chat completion endpoint. The `--reasoning-parser` flag specifies the reasoning parser to use for extracting reasoning content from the model output.
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-    --enable-reasoning --reasoning-parser deepseek_r1
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --reasoning-parser deepseek_r1
 ```
 
 Next, make a request to the model that should return the reasoning content in the response.
@@ -43,6 +48,7 @@ model = models.data[0].id
 
 # Round 1
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
+# For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
 response = client.chat.completions.create(model=model, messages=messages)
 
 reasoning_content = response.choices[0].message.reasoning_content
@@ -79,7 +85,7 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
 }
 ```
 
-OpenAI Python client library does not officially support `reasoning_content` attribute for streaming output. But the client support extra attributes in the response. You can use `hasattr` to check if the `reasoning_content` attribute is present in the response. For example:
+OpenAI Python client library does not officially support `reasoning_content` attribute for streaming output. But the client supports extra attributes in the response. You can use `hasattr` to check if the `reasoning_content` attribute is present in the response. For example:
 
 ```python
 from openai import OpenAI
@@ -97,6 +103,7 @@ models = client.models.list()
 model = models.data[0].id
 
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
+# For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
 stream = client.chat.completions.create(model=model,
                                         messages=messages,
                                         stream=True)
@@ -131,7 +138,13 @@ Remember to check whether the `reasoning_content` exists in the response before 
 
 ## Structured output
 
-The reasoning content is also available in the structured output. The structured output engine like `xgrammar` will use the reasoning content to generate structured output.
+The reasoning content is also available in the structured output. The structured output engine like `xgrammar` will use the reasoning content to generate structured output. It is only supported in v0 engine now.
+
+```bash
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --reasoning-parser deepseek_r1
+```
+
+The following is an example client:
 
 ```python
 from openai import OpenAI
@@ -210,7 +223,7 @@ print(f"Function called: {tool_call.name}")
 print(f"Arguments: {tool_call.arguments}")
 ```
 
-For more examples, please refer to <gh-file:examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py> .
+For more examples, please refer to <gh-file:examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py>.
 
 ## Limitations
 
@@ -218,7 +231,7 @@ For more examples, please refer to <gh-file:examples/online_serving/openai_chat_
 
 ## How to support a new reasoning model
 
-You can add a new `ReasoningParser` similar to `vllm/entrypoints/openai/reasoning_parsers/deepseek_r1_reasoning_parser.py`.
+You can add a new `ReasoningParser` similar to <gh-file:vllm/entrypoints/openai/reasoning_parsers/deepseek_r1_reasoning_parser.py>.
 
 ```python
 # import the required packages
@@ -275,7 +288,7 @@ class ExampleParser(ReasoningParser):
         """
 ```
 
-Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in `vllm/model_executor/guided_decoding/reasoner/deepseek_reasoner.py`.
+Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in <gh-file:vllm/model_executor/guided_decoding/reasoner/deepseek_reasoner.py>.
 
 ```python
 @dataclass
@@ -301,11 +314,10 @@ class DeepSeekReasoner(Reasoner):
     ...
 ```
 
-The structured output engine like `xgrammar` will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
+The structured output engine like [xgrammar](https://github.com/mlc-ai/xgrammar) will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
 
-Finally, you can enable reasoning for the model by using the `--enable-reasoning` and `--reasoning-parser` flags.
+Finally, you can enable reasoning for the model by using the `--reasoning-parser` flags.
 
 ```bash
-vllm serve <model_tag> \
-    --enable-reasoning --reasoning-parser example
+vllm serve <model_tag> --reasoning-parser example
 ```

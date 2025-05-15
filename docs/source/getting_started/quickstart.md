@@ -19,8 +19,8 @@ If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/
 It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
 
 ```console
-uv venv myenv --python 3.12 --seed
-source myenv/bin/activate
+uv venv --python 3.12 --seed
+source .venv/bin/activate
 uv pip install vllm
 ```
 
@@ -208,5 +208,5 @@ Currently, vLLM supports multiple backends for efficient Attention computation a
 If desired, you can also manually set the backend of your choice by configuring the environment variable `VLLM_ATTENTION_BACKEND` to one of the following options: `FLASH_ATTN`, `FLASHINFER` or `XFORMERS`.
 
 ```{attention}
-There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [Dockerfile](https://github.com/vllm-project/vllm/blob/main/Dockerfile) for instructions on how to install it.
+There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see <gh-file:docker/Dockerfile> for instructions on how to install it.
 ```
