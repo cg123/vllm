@@ -965,7 +965,7 @@ def _get_prompt_logprob_if_needed(
     top_logprobs: torch.Tensor,
     selected_logprobs_idx: int,
     top_logprob_idx: int,
-) -> Tuple[Optional[PromptLogprobs], int, int]:
+) -> tuple[Optional[PromptLogprobs], int, int]:
     """Compute the prompt logprob from a sequence group if needed."""
     sampling_params = seq_group.sampling_params
     is_prompt = seq_group.is_prompt
