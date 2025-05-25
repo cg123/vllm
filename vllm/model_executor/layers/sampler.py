@@ -970,41 +970,54 @@ def _get_prompt_logprob_if_needed(
     sampling_params = seq_group.sampling_params
     is_prompt = seq_group.is_prompt
 
-    # Find prompt logprobs
-    prompt_logprobs: Optional[PromptLogprobs] = None
+    final_prompt_logprobs: Optional[PromptLogprobs] = None
+
     if is_prompt and sampling_params.prompt_logprobs is not None:
-        prompt_logprobs = []
-        num_logprobs = sampling_params.prompt_logprobs
+        final_prompt_logprobs = []
+        num_top_k_logprobs = sampling_params.prompt_logprobs  # k (e.g., 5, 10)
         next_prompt_tokens = _get_next_prompt_tokens(seq_group)
-        # Pre-select indexes and create a list. It is faster than calling .item
-        # repetitively.
-        selected_logprob_items = selected_logprobs[
-            selected_logprobs_idx:selected_logprobs_idx +
-            len(next_prompt_tokens)].tolist()
+        num_tokens_in_prompt = len(next_prompt_tokens)
 
-        for idx, token_id in enumerate(next_prompt_tokens):
-            # Calculate the prompt logprob of the real prompt tokens.
-            _logprobs = [(
-                token_id,
-                selected_logprob_items[idx],
-            )]
+        if num_tokens_in_prompt == 0: # Should not happen if is_prompt is true, but defensive
+            return None, top_logprob_idx, selected_logprobs_idx
 
-            # Add top K prompt logprobs along with its rank.
-            if num_logprobs > 0:
-                top_ids = top_token_ids[
-                    top_logprob_idx, :num_logprobs].tolist()
-                top_probs = top_logprobs[
-                    top_logprob_idx, :num_logprobs].tolist()
-                _logprobs.extend(
-                    (top_id, top_prob)
-                    for top_id, top_prob in zip(top_ids, top_probs))
-            prompt_logprobs.append(_logprobs)
-            # + 1 to go to the next prompt token.
-            top_logprob_idx += 1
+        actual_token_logprob_values = selected_logprobs[
+            selected_logprobs_idx : selected_logprobs_idx + num_tokens_in_prompt
+        ].tolist()
 
-        # + len(next_prompt_tokens) to go to the next prompt.
-        selected_logprobs_idx += len(next_prompt_tokens)
-    return prompt_logprobs, top_logprob_idx, selected_logprobs_idx
+        all_prompt_top_k_ids_list = []
+        all_prompt_top_k_probs_list = []
+        if num_top_k_logprobs > 0:
+            gpu_top_ids_for_prompt = top_token_ids[
+                top_logprob_idx : top_logprob_idx + num_tokens_in_prompt, :num_top_k_logprobs
+            ]
+            gpu_top_probs_for_prompt = top_logprobs[
+                top_logprob_idx : top_logprob_idx + num_tokens_in_prompt, :num_top_k_logprobs
+            ]
+            all_prompt_top_k_ids_list = gpu_top_ids_for_prompt.tolist()
+            all_prompt_top_k_probs_list = gpu_top_probs_for_prompt.tolist()
+
+        for i in range(num_tokens_in_prompt):
+            actual_token_id = next_prompt_tokens[i]
+            actual_logprob = actual_token_logprob_values[i]
+            current_token_output = [(actual_token_id, actual_logprob)]
+
+            if num_top_k_logprobs > 0:
+                token_specific_top_ids = all_prompt_top_k_ids_list[i]
+                token_specific_top_probs = all_prompt_top_k_probs_list[i]
+                top_k_entries = [
+                    (token_specific_top_ids[j], token_specific_top_probs[j])
+                    for j in range(num_top_k_logprobs)
+                ]
+                current_token_output.extend(top_k_entries)
+            
+            final_prompt_logprobs.append(current_token_output)
+
+        # Update indices for the next sequence group
+        top_logprob_idx += num_tokens_in_prompt
+        selected_logprobs_idx += num_tokens_in_prompt
+        
+    return final_prompt_logprobs, top_logprob_idx, selected_logprobs_idx
 
 
 def _get_sampled_logprob_if_needed(
